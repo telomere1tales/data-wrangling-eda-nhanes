@@ -1,0 +1,398 @@
+---
+title: "data_wrangling_eda_nhanes"
+author: "Noelia Caba Martin"
+date: "2026-03-17"
+output: html_document
+---
+
+## Introduction
+
+The National Health and Nutrition Examination Survey (NHANES) is a 
+program of studies designed to assess the health and nutritional status 
+of adults and children in the United States. The survey combines 
+interviews and physical examinations and is conducted by the National 
+Center for Health Statistics (NCHS).
+
+This project demonstrates a complete data wrangling and exploratory 
+data analysis (EDA) pipeline applied to real-world clinical data. 
+Real-world datasets frequently contain missing values, outliers, 
+inconsistent coding, and other data quality issues that must be 
+addressed before any statistical analysis.
+
+**Research question:** What are the demographic and clinical 
+characteristics of the NHANES population, and what factors are 
+associated with diabetes status?
+
+The main objectives are:
+
+- Perform data quality assessment and cleaning
+- Handle missing values appropriately
+- Identify and address outliers
+- Conduct exploratory data analysis
+- Perform biostatistical comparisons between diabetic and 
+non-diabetic participants
+
+## Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+```{r libraries}
+library(NHANES)
+library(naniar)
+library(ggcorrplot)
+library(tableone)
+library(tidyverse)
+library(ggplot2)
+```
+
+## Data Import and Initial Exploration
+```{r load-data}
+# Load NHANES dataset
+data(NHANES)
+
+# Initial exploration
+dim(NHANES)
+str(NHANES)
+```
+
+The NHANES dataset contains **10,000 observations** and **76 variables** 
+covering demographic, clinical, laboratory, and lifestyle information.
+
+For this analysis, we will focus on a subset of clinically relevant 
+variables and use **diabetes status** as the primary grouping variable 
+for biostatistical comparisons.
+
+## Data Quality Assessment
+
+Before cleaning the data, it is essential to assess the extent and 
+pattern of missing values. Missing data is extremely common in 
+real-world clinical datasets and must be handled appropriately to 
+avoid biased results.
+
+```{r missing-data}
+# Select clinically relevant variables
+nhanes_clean <- NHANES %>%
+  select(ID, Gender, Age, Race1, Education, BMI,
+         Weight, Height, BPSysAve, BPDiaAve,
+         TotChol, DirectChol, Diabetes,
+         PhysActive, SleepHrsNight, SmokeNow,
+         AlcoholYear, HealthGen)
+
+# Visualize missing data pattern
+vis_miss(nhanes_clean) +
+  labs(title = "Missing Data Pattern - NHANES Dataset") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Summary of missing values
+miss_var_summary(nhanes_clean) %>%
+  filter(n_miss > 0) %>%
+  arrange(desc(pct_miss))
+```
+
+The missing data assessment reveals substantial missingness in several 
+variables:
+
+- **SmokeNow** (67.9% missing): this variable is only asked of participants 
+who have previously smoked, making it **Missing Not At Random (MNAR)**. 
+This variable will be excluded from the main analysis.
+- **AlcoholYear** (40.8% missing): high missingness, will be excluded.
+- **Education, HealthGen, SleepHrsNight** (22-28% missing): moderate 
+missingness, will be handled with complete case analysis.
+- **Clinical variables** (BMI, Blood Pressure, Cholesterol): 14-15% 
+missing, acceptable for clinical datasets.
+
+### Types of Missing Data
+
+- **MCAR (Missing Completely At Random):** missingness is unrelated to 
+any variable
+- **MAR (Missing At Random):** missingness depends on observed variables
+- **MNAR (Missing Not At Random):** missingness depends on the missing 
+value itself (e.g., SmokeNow)
+
+## Data Cleaning
+
+Based on the missing data assessment, we will:
+
+1. **Remove variables** with excessive missingness (SmokeNow, AlcoholYear)
+2. **Filter complete cases** for key clinical variables
+3. **Remove duplicate IDs** — the NHANES dataset contains repeated 
+measurements for some participants
+4. **Check and handle outliers** in continuous variables
+
+```{r data-cleaning}
+# Remove variables with excessive missingness and duplicates
+nhanes_clean <- nhanes_clean %>%
+  select(-SmokeNow, -AlcoholYear) %>%
+  distinct(ID, .keep_all = TRUE) %>%
+  filter(!is.na(Diabetes)) %>%
+  filter(!is.na(BMI)) %>%
+  filter(!is.na(BPSysAve)) %>%
+  filter(!is.na(TotChol))
+
+# Check dimensions after cleaning
+dim(nhanes_clean)
+
+# Check remaining missing values
+miss_var_summary(nhanes_clean) %>%
+  filter(n_miss > 0)
+```
+
+After cleaning, the dataset contains **5,197 participants** and **16 variables**. 
+The cleaning steps removed:
+
+- Duplicate participant IDs (repeated measurements)
+- Participants with missing values in key clinical variables 
+(Diabetes, BMI, Blood Pressure, Cholesterol)
+- Variables with excessive missingness (SmokeNow, AlcoholYear)
+
+Remaining missingness in Education (19.5%), HealthGen (13.2%), 
+SleepHrsNight (13.1%), and PhysActive (6.3%) will be handled using 
+complete case analysis for each specific analysis.
+
+## Outlier Detection and Handling
+
+Outliers are extreme values that may represent data entry errors, 
+measurement errors, or genuinely unusual observations. In clinical 
+data, it is important to distinguish between:
+
+- **True outliers:** genuine extreme values that should be investigated
+- **Data errors:** impossible or implausible values that should be removed
+
+We will use **boxplots** and **the IQR method** to identify outliers 
+in key continuous variables. A value is considered an outlier if it 
+falls more than 1.5 × IQR below Q1 or above Q3.
+
+```{r outliers}
+# Visualize outliers in key continuous variables
+nhanes_clean %>%
+  select(BMI, BPSysAve, BPDiaAve, TotChol, Age) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "value") %>%
+  ggplot(aes(x = variable, y = value, fill = variable)) +
+  geom_boxplot(alpha = 0.7, outlier.color = "red", outlier.size = 1.5) +
+  facet_wrap(~variable, scales = "free") +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(title = "Distribution and Outliers - Key Clinical Variables",
+       x = "", y = "Value")
+
+# Count outliers using IQR method
+outlier_count <- nhanes_clean %>%
+  select(BMI, BPSysAve, BPDiaAve, TotChol) %>%
+  summarise(across(everything(), ~sum(. > quantile(., 0.75, na.rm = TRUE) + 
+              1.5 * IQR(., na.rm = TRUE) | 
+              . < quantile(., 0.25, na.rm = TRUE) - 
+              1.5 * IQR(., na.rm = TRUE), na.rm = TRUE)))
+
+outlier_count
+```
+
+The IQR method identified outliers in all four key clinical variables:
+
+- **BMI** (132 outliers): extreme values likely represent genuine obesity 
+cases rather than data errors, as very high BMI values are clinically 
+plausible
+- **BPSysAve** (142 outliers): some extreme values may represent 
+hypertensive crises or measurement errors
+- **BPDiaAve** (177 outliers): values near zero are clinically implausible 
+and likely represent measurement errors
+- **TotChol** (70 outliers): extreme values may represent genuine 
+hypercholesterolemia cases
+
+Given that this is a population-based survey, most outliers likely 
+represent genuine extreme values rather than errors. We will retain 
+them for the analysis but note their presence as a limitation.
+
+## Exploratory Data Analysis
+
+With the data cleaned, we now perform a comprehensive exploratory data 
+analysis to understand the distribution of variables and relationships 
+between them, with a focus on differences between diabetic and 
+non-diabetic participants.
+
+### Diabetes Prevalence
+
+```{r diabetes-prevalence}
+# Diabetes prevalence
+nhanes_clean %>%
+  count(Diabetes) %>%
+  mutate(pct = round(n / sum(n) * 100, 1)) %>%
+  ggplot(aes(x = Diabetes, y = pct, fill = Diabetes)) +
+  geom_col(width = 0.5, alpha = 0.8) +
+  geom_text(aes(label = paste0(pct, "%")), 
+            vjust = -0.5, size = 5, fontface = "bold") +
+  scale_fill_manual(values = c("No" = "#2E9FDF", "Yes" = "#E64B35")) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(title = "Diabetes Prevalence in NHANES Sample",
+       x = "Diabetes Status", y = "Percentage (%)")
+```
+
+In this NHANES sample, **9.3% of participants (n = 483)** have diabetes, 
+consistent with the reported prevalence of approximately 10% in the 
+United States adult population. This confirms that our cleaned dataset 
+is representative of the general population.
+
+### Distribution of Clinical Variables by Diabetes Status
+
+```{r distributions-by-diabetes}
+# Distribution of continuous variables by diabetes status
+nhanes_clean %>%
+  select(Diabetes, Age, BMI, BPSysAve, TotChol) %>%
+  pivot_longer(-Diabetes, names_to = "variable", values_to = "value") %>%
+  ggplot(aes(x = value, fill = Diabetes, color = Diabetes)) +
+  geom_density(alpha = 0.4) +
+  facet_wrap(~variable, scales = "free") +
+  scale_fill_manual(values = c("No" = "#2E9FDF", "Yes" = "#E64B35")) +
+  scale_color_manual(values = c("No" = "#2E9FDF", "Yes" = "#E64B35")) +
+  theme_minimal() +
+  labs(title = "Distribution of Clinical Variables by Diabetes Status",
+       x = "Value", y = "Density", fill = "Diabetes", color = "Diabetes")
+```
+
+The density plots reveal clear differences between diabetic and 
+non-diabetic participants:
+
+- **Age:** diabetic participants are substantially older, with the 
+distribution shifted towards higher ages
+- **BMI:** diabetic participants show higher BMI values, consistent 
+with obesity as a major risk factor for type 2 diabetes
+- **Systolic Blood Pressure:** diabetic participants tend to have 
+slightly higher blood pressure, reflecting the common comorbidity 
+of hypertension in diabetes
+- **Total Cholesterol:** distributions largely overlap between groups, 
+suggesting cholesterol alone may not be a strong discriminator
+
+## Biostatistical Analysis
+
+Having explored the data visually, we now perform formal biostatistical 
+tests to quantify the differences between diabetic and non-diabetic 
+participants.
+
+### Table 1 - Baseline Characteristics
+
+The "Table 1" is a standard element in clinical research papers. It 
+summarizes the demographic and clinical characteristics of the study 
+population, stratified by the main grouping variable, and includes 
+p-values for between-group comparisons.
+
+```{r table-one}
+# Define variables for Table 1
+vars <- c("Age", "Gender", "BMI", "BPSysAve", 
+          "BPDiaAve", "TotChol", "PhysActive", 
+          "SleepHrsNight", "HealthGen")
+
+# Define categorical variables
+cat_vars <- c("Gender", "PhysActive", "HealthGen")
+
+# Create Table 1
+table1 <- CreateTableOne(
+  vars = vars,
+  strata = "Diabetes",
+  data = nhanes_clean,
+  factorVars = cat_vars
+)
+
+print(table1, showAllLevels = TRUE, formatOptions = list(big.mark = ","))
+```
+
+Table 1 reveals significant differences between diabetic and non-diabetic 
+participants in most clinical variables:
+
+- **Age** (p < 0.001): diabetic participants are on average 21 years older 
+(59.82 vs 38.85 years)
+- **BMI** (p < 0.001): diabetic participants have substantially higher BMI 
+(32.44 vs 27.23 kg/m²)
+- **Systolic Blood Pressure** (p < 0.001): diabetic participants show 
+higher blood pressure (129.06 vs 116.99 mmHg)
+- **Physical Activity** (p < 0.001): diabetic participants are less 
+physically active (38.6% vs 57.0%)
+- **General Health** (p < 0.001): diabetic participants report worse 
+overall health status
+
+Notably, **Gender** (p = 0.306) and **Total Cholesterol** (p = 0.159) 
+did not differ significantly between groups.
+
+## Correlation Analysis
+
+A correlation matrix allows us to visualize the relationships between 
+all continuous variables simultaneously. This helps identify potential 
+multicollinearity and understand which variables are related to each other.
+
+A correlation coefficient (r) ranges from -1 to 1:
+
+- **r close to 1:** strong positive correlation
+- **r close to -1:** strong negative correlation  
+- **r close to 0:** no linear relationship
+
+```{r correlation-matrix}
+# Select continuous variables
+cor_data <- nhanes_clean  %>% 
+  select(Age, BMI, BPSysAve, BPDiaAve, TotChol, SleepHrsNight)  %>% 
+  cor(use = "complete.obs")
+
+# Plot correlation matrix
+ggcorrplot(cor_data,
+  method = "circle",
+  type = "lower",
+  lab = TRUE,
+  lab_size = 3,
+  colors = c("#2E9FDF", "white", "#E64B35"),
+  title = "Correlation Matrix - Clinical Variables",
+  ggtheme = theme_minimal()
+)
+```
+
+The correlation matrix reveals several clinically meaningful relationships:
+
+- **Age and Systolic Blood Pressure** show the strongest correlation 
+(r = 0.44), consistent with the well-established increase in blood 
+pressure with aging
+- **Systolic and Diastolic Blood Pressure** are moderately correlated 
+(r = 0.32), as expected for two measures of the same physiological process
+- **Age and Total Cholesterol** show a weak positive correlation (r = 0.20)
+- **Sleep Hours** show no meaningful linear correlations with any clinical 
+variable
+
+Notably, no pairs show very high correlations (r > 0.7), suggesting 
+absence of problematic multicollinearity among our variables.
+
+## Conclusions
+
+This analysis demonstrates a complete data wrangling and biostatistical 
+analysis pipeline applied to real-world clinical data from the NHANES survey.
+
+**Key findings:**
+
+1. The raw NHANES dataset required substantial cleaning, including removal 
+of duplicate IDs, variables with excessive missingness (SmokeNow: 67.9%, 
+AlcoholYear: 40.8%), and participants with missing values in key clinical 
+variables. The final dataset contained **5,197 participants**.
+
+2. Diabetes prevalence in this sample was **9.3%**, consistent with 
+reported US population estimates of approximately 10%.
+
+3. Diabetic participants differed significantly from non-diabetic 
+participants in age (59.82 vs 38.85 years, p < 0.001), BMI (32.44 vs 
+27.23 kg/m², p < 0.001), systolic blood pressure (129.06 vs 116.99 mmHg, 
+p < 0.001), and physical activity levels (p < 0.001).
+
+4. Gender and total cholesterol did not differ significantly between 
+diabetic and non-diabetic participants.
+
+5. Correlation analysis revealed age and systolic blood pressure as the 
+most strongly correlated variables (r = 0.44), with no problematic 
+multicollinearity detected.
+
+**Limitations:**
+
+- Complete case analysis was used for variables with moderate missingness, 
+which may introduce bias if data are not missing at random
+- Outliers were retained in the analysis as they likely represent genuine 
+extreme values in a population survey
+- Cross-sectional design prevents causal inference
+
+**Future directions:**
+
+- Apply multiple imputation for missing data handling
+- Build a logistic regression model to predict diabetes status
+- Investigate interaction effects between age, BMI and blood pressure
